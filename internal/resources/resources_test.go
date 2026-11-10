@@ -3012,6 +3012,9 @@ func TestBuildStatefulSet_OTelCollectorNativeSidecar(t *testing.T) {
 	instance := newTestInstance("sts-otel-collector-native-sidecar")
 	instance.Spec.Ollama.Enabled = true
 	instance.Spec.Ollama.Models = []string{"llama3"}
+	instance.Spec.InitContainers = []corev1.Container{
+		{Name: "user-init", Image: "busybox:1.37"},
+	}
 	sts := BuildStatefulSet(instance, "", nil, nil, nil)
 	podSpec := sts.Spec.Template.Spec
 
@@ -3036,11 +3039,27 @@ func TestBuildStatefulSet_OTelCollectorNativeSidecar(t *testing.T) {
 		t.Errorf("otel-collector restartPolicy = %v, want Always", collector.RestartPolicy)
 	}
 
-	// Run-to-completion init containers must come before the collector.
-	for _, c := range podSpec.InitContainers[idx+1:] {
+	// Operator-managed run-to-completion init containers must come before the
+	// collector. User-defined init containers keep running after all
+	// operator-managed ones, so they follow it.
+	userInit := -1
+	for i, c := range podSpec.InitContainers[idx+1:] {
+		if c.Name == "user-init" {
+			userInit = idx + 1 + i
+			continue
+		}
 		if c.RestartPolicy == nil || *c.RestartPolicy != corev1.ContainerRestartPolicyAlways {
 			t.Errorf("init container %q runs after otel-collector, want it before", c.Name)
 		}
+	}
+	if userInit < 0 {
+		t.Fatal("user-init should run after otel-collector")
+	}
+	if userInit != len(podSpec.InitContainers)-1 {
+		t.Errorf("user-init at index %d, want last (%d)", userInit, len(podSpec.InitContainers)-1)
+	}
+	if podSpec.InitContainers[userInit].RestartPolicy != nil {
+		t.Errorf("user-init restartPolicy = %v, want unset", *podSpec.InitContainers[userInit].RestartPolicy)
 	}
 }
 
