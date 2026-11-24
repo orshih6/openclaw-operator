@@ -163,4 +163,9 @@ union is asserted to be a superset of config/rbac/role.yaml.
 - apiGroups: ["openclaw.rocks"]
   resources: ["openclawclusterdefaults"]
   verbs: ["get", "list", "watch"]
+# Node kubelet versions, read once at startup to decide whether the OTel
+# Collector can run as a native sidecar (--native-sidecars=auto)
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list"]
 {{- end }}

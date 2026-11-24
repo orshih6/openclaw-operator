@@ -313,7 +313,8 @@ var _ = Describe("Observability - Deep Insights", func() {
 			}
 			Expect(foundMetricsSvcPort).To(BeTrue(), "Service should have a metrics port")
 
-			// Verify StatefulSet has OTel Collector native sidecar with metrics port
+			// Verify StatefulSet has the OTel Collector sidecar with metrics
+			// port: a native sidecar where supported, else a regular container
 			sts := &appsv1.StatefulSet{}
 			Eventually(func() error {
 				return k8sClient.Get(ctx, types.NamespacedName{
@@ -322,13 +323,25 @@ var _ = Describe("Observability - Deep Insights", func() {
 				}, sts)
 			}, timeout, interval).Should(Succeed())
 
+			collectorContainers := sts.Spec.Template.Spec.Containers
+			otherContainers := sts.Spec.Template.Spec.InitContainers
+			if nativeSidecars {
+				collectorContainers, otherContainers = otherContainers, collectorContainers
+			}
+			for _, c := range otherContainers {
+				Expect(c.Name).NotTo(Equal("otel-collector"),
+					"otel-collector should be in exactly one container list (native sidecars: %v)", nativeSidecars)
+			}
 			foundOTelCollector := false
-			for _, c := range sts.Spec.Template.Spec.InitContainers {
+			for _, c := range collectorContainers {
 				if c.Name == "otel-collector" {
 					foundOTelCollector = true
-					Expect(c.RestartPolicy).NotTo(BeNil())
-					Expect(*c.RestartPolicy).To(Equal(corev1.ContainerRestartPolicyAlways),
-						"otel-collector should be a native sidecar")
+					if nativeSidecars {
+						Expect(c.RestartPolicy).To(HaveValue(Equal(corev1.ContainerRestartPolicyAlways)),
+							"otel-collector should be a native sidecar")
+					} else {
+						Expect(c.RestartPolicy).To(BeNil(), "otel-collector should be a regular container")
+					}
 					foundMetricsPort := false
 					for _, p := range c.Ports {
 						if p.Name == "metrics" {

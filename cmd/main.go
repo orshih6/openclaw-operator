@@ -41,6 +41,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -79,6 +80,7 @@ func main() {
 	var otlpEndpoint string
 	var otlpInsecure bool
 	var watchNamespacesFlag string
+	var nativeSidecarsFlag string
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable.")
@@ -89,6 +91,7 @@ func main() {
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint for metrics export (e.g. collector.observability.svc:4317). Also respects OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&otlpInsecure, "otlp-insecure", true, "If set, OTLP exporter connects without TLS.")
 	flag.StringVar(&watchNamespacesFlag, "watch-namespaces", "", "Comma-separated list of namespaces to watch. If empty, the operator watches all namespaces (cluster-scoped). Set this when running with namespaced RBAC.")
+	flag.StringVar(&nativeSidecarsFlag, "native-sidecars", "auto", "Whether to run the OTel Collector as a native sidecar: auto (when the API server and every node's kubelet are 1.29+), true, or false.")
 
 	opts := zap.Options{
 		Development: true,
@@ -162,19 +165,15 @@ func main() {
 	}
 
 	// Native sidecars are on by default from Kubernetes 1.29. On older
-	// clusters the OTel Collector keeps running as a regular container.
-	// Checked once at startup; restart the operator after a cluster upgrade.
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	// clusters, or while any node still runs an older kubelet, the OTel
+	// Collector keeps running as a regular container. Checked once at
+	// startup; restart the operator after upgrading the cluster.
+	nativeSidecars, err := resolveNativeSidecars(nativeSidecarsFlag, restConfig, mgr.GetAPIReader())
 	if err != nil {
-		setupLog.Error(err, "unable to create discovery client")
+		setupLog.Error(err, "unable to determine native sidecar support")
 		os.Exit(1)
 	}
-	nativeSidecars, err := controller.DetectNativeSidecars(discoveryClient)
-	if err != nil {
-		setupLog.Error(err, "unable to detect native sidecar support")
-		os.Exit(1)
-	}
-	setupLog.Info("detected native sidecar support", "nativeSidecars", nativeSidecars)
+	setupLog.Info("native sidecar support", "nativeSidecars", nativeSidecars, "mode", nativeSidecarsFlag)
 
 	versionResolver := registry.NewResolver(5 * time.Minute)
 	skillPackResolver := skillpacks.NewResolver(5*time.Minute, os.Getenv("GITHUB_TOKEN"))
@@ -361,4 +360,27 @@ func setupOTLPMetrics(endpoint string, insecure bool) (func(context.Context) err
 	)
 
 	return provider.Shutdown, nil
+}
+
+// resolveNativeSidecars applies the --native-sidecars flag: "true" and
+// "false" force the layout, "auto" detects it from the API server and node
+// kubelet versions.
+func resolveNativeSidecars(mode string, restConfig *rest.Config, nodes client.Reader) (bool, error) {
+	switch mode {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	case "auto":
+	default:
+		return false, fmt.Errorf("invalid --native-sidecars value %q: want auto, true or false", mode)
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		return false, fmt.Errorf("creating discovery client: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ctx = ctrl.LoggerInto(ctx, setupLog)
+	return controller.DetectNativeSidecars(ctx, discoveryClient, nodes)
 }

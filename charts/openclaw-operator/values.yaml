@@ -45,6 +45,12 @@ watchNamespaces: []
 #   - team-a
 #   - team-b
 
+# Whether the OTel Collector runs as a native sidecar, so it outlives the
+# gateway on pod termination. "auto" uses native sidecars only when the API
+# server and every node's kubelet are 1.29+ (checked at operator startup);
+# "true" and "false" force the layout.
+nativeSidecars: auto
+
 # Pod annotations
 podAnnotations: {}
 

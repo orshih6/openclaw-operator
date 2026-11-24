@@ -37,12 +37,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	openclawv1alpha1 "github.com/paperclipinc/openclaw-operator/api/v1alpha1"
+	"github.com/paperclipinc/openclaw-operator/internal/controller"
 	"github.com/paperclipinc/openclaw-operator/internal/resources"
 )
 
@@ -51,6 +53,13 @@ var (
 	k8sClient client.Client
 	ctx       context.Context
 	cancel    context.CancelFunc
+
+	// nativeSidecars is the OTel Collector layout the operator is expected
+	// to pick on this cluster, detected the same way the operator does it
+	// with --native-sidecars=auto (the default). Set E2E_NATIVE_SIDECARS to
+	// true or false when the operator under test was deployed with an
+	// explicit --native-sidecars value.
+	nativeSidecars bool
 )
 
 func TestE2E(t *testing.T) {
@@ -73,6 +82,19 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	switch override := os.Getenv("E2E_NATIVE_SIDECARS"); override {
+	case "true", "false":
+		nativeSidecars = override == "true"
+	case "":
+		discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+		Expect(err).NotTo(HaveOccurred())
+		nativeSidecars, err = controller.DetectNativeSidecars(ctx, discoveryClient, k8sClient)
+		Expect(err).NotTo(HaveOccurred())
+	default:
+		Fail(fmt.Sprintf("invalid E2E_NATIVE_SIDECARS %q: want true or false", override))
+	}
+	GinkgoWriter.Printf("expecting native sidecars: %v\n", nativeSidecars)
 })
 
 var _ = AfterSuite(func() {
@@ -172,9 +194,13 @@ var _ = Describe("OpenClawInstance Controller", func() {
 				}, service)
 			}, timeout, interval).Should(Succeed())
 
-			// Verify the StatefulSet has main + gateway-proxy containers
-			// (otel-collector is a native sidecar in initContainers)
-			Expect(statefulSet.Spec.Template.Spec.Containers).To(HaveLen(2))
+			// Verify the StatefulSet has main + gateway-proxy containers, plus
+			// otel-collector when it cannot run as a native sidecar
+			if nativeSidecars {
+				Expect(statefulSet.Spec.Template.Spec.Containers).To(HaveLen(2))
+			} else {
+				Expect(statefulSet.Spec.Template.Spec.Containers).To(HaveLen(3))
+			}
 			Expect(statefulSet.Spec.Template.Spec.Containers[0].Image).To(Equal("ghcr.io/openclaw/openclaw:latest"))
 
 			// Verify handshake timeout env var is injected (workaround for upstream #46892)

@@ -95,3 +95,20 @@ func TestBuildCacheOptions_OperatorNamespaceAlsoWatched(t *testing.T) {
 		t.Error("an explicitly watched operator namespace should still be in DefaultNamespaces")
 	}
 }
+
+func TestResolveNativeSidecars_ExplicitModes(t *testing.T) {
+	// Explicit modes must not touch the cluster, so nil config and reader
+	// are fine.
+	for mode, want := range map[string]bool{"true": true, "false": false} {
+		got, err := resolveNativeSidecars(mode, nil, nil)
+		if err != nil {
+			t.Fatalf("resolveNativeSidecars(%q) error: %v", mode, err)
+		}
+		if got != want {
+			t.Errorf("resolveNativeSidecars(%q) = %v, want %v", mode, got, want)
+		}
+	}
+	if _, err := resolveNativeSidecars("yes", nil, nil); err == nil {
+		t.Error("expected an error for an invalid mode")
+	}
+}

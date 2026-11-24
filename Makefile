@@ -57,7 +57,8 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet envtest test-plugin-installer test-envtest-recipe ## Run tests.
 	assets="$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" || { echo "failed to obtain envtest assets" >&2; exit 1; }; \
 	  if [ -z "$$assets" ]; then echo "envtest returned an empty asset path" >&2; exit 1; fi; \
-	  KUBEBUILDER_ASSETS="$$assets" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	  KUBEBUILDER_ASSETS="$$assets" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out && \
+	  KUBEBUILDER_ASSETS="$$assets" ENVTEST_NATIVE_SIDECARS=false go test ./internal/controller/ -run '^TestControllers$$' -count=1
 
 .PHONY: test-envtest-recipe
 test-envtest-recipe: ## Verify envtest setup failures stop the test recipe.

@@ -122,14 +122,39 @@ var _ = Describe("OpenClawInstance Controller", func() {
 			}, timeout, interval).Should(BeTrue())
 
 			By("Verifying StatefulSet is created")
+			sts := &appsv1.StatefulSet{}
 			Eventually(func() bool {
-				sts := &appsv1.StatefulSet{}
 				err := k8sClient.Get(ctx, types.NamespacedName{
 					Name:      resources.StatefulSetName(instance),
 					Namespace: "default",
 				}, sts)
 				return err == nil
 			}, timeout, interval).Should(BeTrue())
+
+			By("Verifying the OTel Collector layout follows native sidecar support")
+			podSpec := sts.Spec.Template.Spec
+			containerNames := func(cs []corev1.Container) []string {
+				names := make([]string, 0, len(cs))
+				for _, c := range cs {
+					names = append(names, c.Name)
+				}
+				return names
+			}
+			if nativeSidecars {
+				Expect(containerNames(podSpec.Containers)).To(Equal([]string{"openclaw", "gateway-proxy"}))
+				Expect(containerNames(podSpec.InitContainers)).To(ContainElement("otel-collector"))
+				for _, c := range podSpec.InitContainers {
+					if c.Name == "otel-collector" {
+						Expect(c.RestartPolicy).To(HaveValue(Equal(corev1.ContainerRestartPolicyAlways)))
+					}
+				}
+			} else {
+				Expect(containerNames(podSpec.Containers)).To(Equal([]string{"openclaw", "gateway-proxy", "otel-collector"}))
+				for _, c := range podSpec.InitContainers {
+					Expect(c.Name).NotTo(Equal("otel-collector"))
+					Expect(c.RestartPolicy).To(BeNil(), "init container %q should run to completion", c.Name)
+				}
+			}
 
 			By("Verifying Service is created")
 			Eventually(func() bool {

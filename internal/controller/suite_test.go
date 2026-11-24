@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -41,6 +43,12 @@ var (
 	testEnv   *envtest.Environment
 	ctx       context.Context
 	cancel    context.CancelFunc
+
+	// nativeSidecars is the capability the suite's reconciler runs with.
+	// It defaults to true (envtest runs a 1.29+ API server); set
+	// ENVTEST_NATIVE_SIDECARS=false to cover the pre-1.29 fallback layout.
+	// make test runs the suite with both values.
+	nativeSidecars = os.Getenv("ENVTEST_NATIVE_SIDECARS") != "false"
 )
 
 func TestControllers(t *testing.T) {
@@ -53,7 +61,7 @@ var _ = BeforeSuite(func() {
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
-	By("bootstrapping test environment")
+	By(fmt.Sprintf("bootstrapping test environment (native sidecars: %v)", nativeSidecars))
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "..", "config", "crd", "bases"),
@@ -87,6 +95,7 @@ var _ = BeforeSuite(func() {
 		Scheme:            mgr.GetScheme(),
 		Recorder:          mgr.GetEventRecorderFor("openclawinstance-controller"),
 		OperatorNamespace: "default",
+		NativeSidecars:    nativeSidecars,
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

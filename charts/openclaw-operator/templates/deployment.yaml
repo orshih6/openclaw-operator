@@ -50,6 +50,7 @@ spec:
             - --metrics-bind-address=0
             {{- end }}
             - --zap-log-level={{ .Values.logLevel }}
+            - --native-sidecars={{ .Values.nativeSidecars }}
             {{- if gt (len .Values.watchNamespaces) 0 }}
             - --watch-namespaces={{ join "," .Values.watchNamespaces }}
             {{- end }}

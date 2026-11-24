@@ -17,11 +17,20 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"errors"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/version"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestNativeSidecarsSupported(t *testing.T) {
@@ -53,17 +62,67 @@ func TestNativeSidecarsSupported(t *testing.T) {
 }
 
 func TestDetectNativeSidecars(t *testing.T) {
-	for gitVersion, want := range map[string]bool{"v1.28.15": false, "v1.29.0": true} {
-		client := &fakediscovery.FakeDiscovery{
-			Fake:               &clienttesting.Fake{},
-			FakedServerVersion: &version.Info{GitVersion: gitVersion},
+	node := func(name, kubelet string) *corev1.Node {
+		return &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{KubeletVersion: kubelet}},
 		}
-		got, err := DetectNativeSidecars(client)
-		if err != nil {
-			t.Fatalf("DetectNativeSidecars(%s) error: %v", gitVersion, err)
-		}
-		if got != want {
-			t.Errorf("DetectNativeSidecars(%s) = %v, want %v", gitVersion, got, want)
-		}
+	}
+	tests := []struct {
+		name       string
+		apiServer  string
+		nodes      []*corev1.Node
+		forbidNode bool
+		want       bool
+	}{
+		{name: "1.28 cluster", apiServer: "v1.28.15", nodes: []*corev1.Node{node("a", "v1.28.15")}, want: false},
+		{name: "1.29 cluster", apiServer: "v1.29.0", nodes: []*corev1.Node{node("a", "v1.29.0"), node("b", "v1.30.1")}, want: true},
+		// Allowed version skew during a control-plane-first upgrade: a 1.28
+		// kubelet rejects restartable init containers.
+		{name: "1.29 API server with a 1.28 worker", apiServer: "v1.29.0", nodes: []*corev1.Node{node("a", "v1.29.0"), node("b", "v1.28.15-eks-a737599")}, want: false},
+		{name: "unparsable kubelet version", apiServer: "v1.29.0", nodes: []*corev1.Node{node("a", "bogus")}, want: false},
+		{name: "no nodes", apiServer: "v1.29.0", want: false},
+		{name: "nodes forbidden", apiServer: "v1.29.0", nodes: []*corev1.Node{node("a", "v1.29.0")}, forbidNode: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sv := &fakediscovery.FakeDiscovery{
+				Fake:               &clienttesting.Fake{},
+				FakedServerVersion: &version.Info{GitVersion: tt.apiServer},
+			}
+			builder := fake.NewClientBuilder()
+			for _, n := range tt.nodes {
+				builder = builder.WithObjects(n)
+			}
+			if tt.forbidNode {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+						return apierrors.NewForbidden(schema.GroupResource{Resource: "nodes"}, "", errors.New("no RBAC"))
+					},
+				})
+			}
+			got, err := DetectNativeSidecars(context.Background(), sv, builder.Build())
+			if err != nil {
+				t.Fatalf("DetectNativeSidecars error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("DetectNativeSidecars = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectNativeSidecars_NodeListError(t *testing.T) {
+	sv := &fakediscovery.FakeDiscovery{
+		Fake:               &clienttesting.Fake{},
+		FakedServerVersion: &version.Info{GitVersion: "v1.29.0"},
+	}
+	nodes := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("connection refused")
+		},
+	}).Build()
+	if _, err := DetectNativeSidecars(context.Background(), sv, nodes); err == nil {
+		t.Error("expected an error when listing nodes fails")
 	}
 }
