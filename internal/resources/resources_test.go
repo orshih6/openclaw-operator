@@ -3063,6 +3063,64 @@ func TestBuildStatefulSet_OTelCollectorNativeSidecar(t *testing.T) {
 	}
 }
 
+// Without native sidecar support (Kubernetes 1.28 with the SidecarContainers
+// gate off) the collector must stay a regular container in its pre-sidecar
+// position, so default instances start and upgrades do not change the
+// pod template.
+func TestBuildStatefulSet_OTelCollectorWithoutNativeSidecars(t *testing.T) {
+	instance := newTestInstance("sts-otel-collector-legacy")
+	instance.Spec.WebTerminal.Enabled = true
+	instance.Spec.InitContainers = []corev1.Container{{Name: "user-init", Image: "busybox:1.37"}}
+	instance.Spec.Sidecars = []corev1.Container{{Name: "user-sidecar", Image: "busybox:1.37"}}
+	sts := BuildStatefulSet(instance, "", nil, nil, nil, WithNativeSidecars(false))
+	podSpec := sts.Spec.Template.Spec
+
+	for _, c := range podSpec.InitContainers {
+		if c.Name == "otel-collector" {
+			t.Fatal("otel-collector should not be an init container without native sidecars")
+		}
+		if c.RestartPolicy != nil {
+			t.Errorf("init container %q has restartPolicy %v, want none", c.Name, *c.RestartPolicy)
+		}
+	}
+	if last := podSpec.InitContainers[len(podSpec.InitContainers)-1].Name; last != "user-init" {
+		t.Errorf("last init container = %q, want user-init", last)
+	}
+
+	var names []string
+	for _, c := range podSpec.Containers {
+		names = append(names, c.Name)
+		if c.Name == "otel-collector" && c.RestartPolicy != nil {
+			t.Errorf("otel-collector restartPolicy = %v, want none", *c.RestartPolicy)
+		}
+	}
+	want := []string{"openclaw", "gateway-proxy", "web-terminal", "otel-collector", "user-sidecar"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("containers = %v, want %v", names, want)
+	}
+
+	// The collector itself is identical in both layouts apart from restartPolicy.
+	native := BuildStatefulSet(instance, "", nil, nil, nil)
+	var nativeCollector, legacyCollector *corev1.Container
+	for i := range native.Spec.Template.Spec.InitContainers {
+		if native.Spec.Template.Spec.InitContainers[i].Name == "otel-collector" {
+			nativeCollector = native.Spec.Template.Spec.InitContainers[i].DeepCopy()
+		}
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == "otel-collector" {
+			legacyCollector = &podSpec.Containers[i]
+		}
+	}
+	if nativeCollector == nil || legacyCollector == nil {
+		t.Fatal("otel-collector missing from one of the layouts")
+	}
+	nativeCollector.RestartPolicy = nil
+	if !equality.Semantic.DeepEqual(*nativeCollector, *legacyCollector) {
+		t.Error("otel-collector differs between native and legacy layouts beyond restartPolicy")
+	}
+}
+
 func TestBuildStatefulSet_MainContainerNoMetricsPort(t *testing.T) {
 	instance := newTestInstance("sts-main-no-metrics")
 	sts := BuildStatefulSet(instance, "", nil, nil, nil)

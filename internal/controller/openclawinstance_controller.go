@@ -88,6 +88,10 @@ type OpenClawInstanceReconciler struct {
 	OperatorNamespace string
 	VersionResolver   *registry.Resolver
 	SkillPackResolver *skillpacks.Resolver
+	// NativeSidecars reports whether the cluster supports native sidecars
+	// (Kubernetes 1.29+). When false, the OTel Collector runs as a regular
+	// container instead of an init container with restartPolicy: Always.
+	NativeSidecars bool
 }
 
 // +kubebuilder:rbac:groups=openclaw.rocks,resources=openclawinstances,verbs=get;list;watch;create;update;patch;delete
@@ -1391,7 +1395,8 @@ func (r *OpenClawInstanceReconciler) reconcileStatefulSet(ctx context.Context, i
 
 	// Build the desired StatefulSet once and reuse for both VCT comparison
 	// and the CreateOrUpdate mutate func.
-	desired := resources.BuildStatefulSet(instance, gwSecretName, skillPacks, wsFiles.defaultFiles, wsFiles.additionalFiles)
+	desired := resources.BuildStatefulSet(instance, gwSecretName, skillPacks, wsFiles.defaultFiles, wsFiles.additionalFiles,
+		resources.WithNativeSidecars(r.NativeSidecars))
 	resources.NormalizeStatefulSet(desired)
 
 	sts := &appsv1.StatefulSet{

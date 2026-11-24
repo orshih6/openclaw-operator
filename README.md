@@ -1423,6 +1423,8 @@ The operator follows a **secure-by-default** philosophy. Every instance ships wi
 
 When `metrics.enabled: true` (the default), the operator automatically configures a full metrics pipeline: it injects `diagnostics.otel` config into OpenClaw to push OTLP metrics to a lightweight OTel Collector sidecar (`otel/opentelemetry-collector`), which exposes a Prometheus scrape endpoint on the configured port (default 9090). No manual OpenClaw configuration is needed.
 
+On Kubernetes 1.29 and later the collector runs as a native sidecar, so it keeps running until the gateway has exited and its final metrics flush on shutdown still arrives. On Kubernetes 1.28 it runs as a regular container, because native sidecars need the `SidecarContainers` feature gate there; metrics still work, but the last flush before shutdown can be lost. The operator checks the API server version when it starts, so restart it after upgrading the cluster from 1.28 to pick up the native sidecar layout (instances with metrics enabled then roll once).
+
 If you already set `diagnostics.otel` in your instance config, the operator fills in only the fields you left out, so the rendered config always states the collector endpoint explicitly. Two settings stay authoritative and are never rewritten:
 
 | Your `diagnostics.otel` | Result |

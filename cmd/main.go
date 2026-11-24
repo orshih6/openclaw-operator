@@ -39,6 +39,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -153,11 +154,27 @@ func main() {
 		setupLog.Info("restricting watch to namespaces", "namespaces", watchNamespaces, "operatorNamespace", operatorNamespace)
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
+	restConfig := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(restConfig, mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	// Native sidecars are on by default from Kubernetes 1.29. On older
+	// clusters the OTel Collector keeps running as a regular container.
+	// Checked once at startup; restart the operator after a cluster upgrade.
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "unable to create discovery client")
+		os.Exit(1)
+	}
+	nativeSidecars, err := controller.DetectNativeSidecars(discoveryClient)
+	if err != nil {
+		setupLog.Error(err, "unable to detect native sidecar support")
+		os.Exit(1)
+	}
+	setupLog.Info("detected native sidecar support", "nativeSidecars", nativeSidecars)
 
 	versionResolver := registry.NewResolver(5 * time.Minute)
 	skillPackResolver := skillpacks.NewResolver(5*time.Minute, os.Getenv("GITHUB_TOKEN"))
@@ -169,6 +186,7 @@ func main() {
 		OperatorNamespace: operatorNamespace,
 		VersionResolver:   versionResolver,
 		SkillPackResolver: skillPackResolver,
+		NativeSidecars:    nativeSidecars,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OpenClawInstance")
 		os.Exit(1)

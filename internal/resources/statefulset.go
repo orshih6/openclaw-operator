@@ -40,7 +40,12 @@ import (
 // OPENCLAW_GATEWAY_TOKEN in spec.env, the env var is injected via SecretKeyRef.
 // externalWorkspaceFiles are the resolved contents of spec.workspace.configMapRef (may be nil).
 // additionalExternalFiles maps workspace name to resolved configMapRef contents (may be nil).
-func BuildStatefulSet(instance *openclawv1alpha1.OpenClawInstance, gatewayTokenSecretName string, skillPacks *ResolvedSkillPacks, externalWorkspaceFiles map[string]string, additionalExternalFiles map[string]map[string]string) *appsv1.StatefulSet {
+func BuildStatefulSet(instance *openclawv1alpha1.OpenClawInstance, gatewayTokenSecretName string, skillPacks *ResolvedSkillPacks, externalWorkspaceFiles map[string]string, additionalExternalFiles map[string]map[string]string, opts ...StatefulSetOption) *appsv1.StatefulSet {
+	o := statefulSetOptions{nativeSidecars: true}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	labels := Labels(instance)
 	selectorLabels := SelectorLabels(instance)
 
@@ -83,8 +88,8 @@ func BuildStatefulSet(instance *openclawv1alpha1.OpenClawInstance, gatewayTokenS
 					AutomountServiceAccountToken:  Ptr(instance.Spec.SelfConfigure.Enabled || meshNeedsServiceAccountToken(instance)),
 					ShareProcessNamespace:         shareProcessNamespace(instance),
 					SecurityContext:               buildPodSecurityContext(instance),
-					InitContainers:                buildInitContainers(instance, externalWorkspaceFiles, additionalExternalFiles, skillPacks),
-					Containers:                    buildContainers(instance, gwSecretName),
+					InitContainers:                buildInitContainers(instance, externalWorkspaceFiles, additionalExternalFiles, skillPacks, o),
+					Containers:                    buildContainers(instance, gwSecretName, o),
 					Volumes:                       buildVolumes(instance, skillPacks),
 					NodeSelector:                  instance.Spec.Availability.NodeSelector,
 					Tolerations:                   instance.Spec.Availability.Tolerations,
@@ -249,7 +254,27 @@ func buildContainerSecurityContext(instance *openclawv1alpha1.OpenClawInstance) 
 }
 
 // buildContainers creates the container specs
-func buildContainers(instance *openclawv1alpha1.OpenClawInstance, gatewayTokenSecretName string) []corev1.Container {
+// StatefulSetOption adjusts how BuildStatefulSet renders the pod template.
+type StatefulSetOption func(*statefulSetOptions)
+
+type statefulSetOptions struct {
+	nativeSidecars bool
+}
+
+// WithNativeSidecars sets whether the cluster supports native sidecars
+// (init containers with restartPolicy: Always). They are on by default from
+// Kubernetes 1.29; on 1.28 the SidecarContainers feature gate is off by
+// default and the API server drops the restartPolicy, which would turn a
+// long-running sidecar into an init container that blocks pod startup.
+// When disabled, the OTel Collector runs as a regular container. Defaults
+// to true.
+func WithNativeSidecars(enabled bool) StatefulSetOption {
+	return func(o *statefulSetOptions) {
+		o.nativeSidecars = enabled
+	}
+}
+
+func buildContainers(instance *openclawv1alpha1.OpenClawInstance, gatewayTokenSecretName string, o statefulSetOptions) []corev1.Container {
 	containers := []corev1.Container{
 		buildMainContainer(instance, gatewayTokenSecretName),
 	}
@@ -279,7 +304,11 @@ func buildContainers(instance *openclawv1alpha1.OpenClawInstance, gatewayTokenSe
 
 	// The OTel Collector is a native sidecar (init container with
 	// restartPolicy: Always) so it outlives the gateway on pod termination.
-	// See buildInitContainers.
+	// See buildInitContainers. Without native sidecar support it runs here
+	// as a regular container, as it did before.
+	if IsMetricsEnabled(instance) && !o.nativeSidecars {
+		containers = append(containers, buildOTelCollectorContainer(instance))
+	}
 
 	// Add custom sidecars
 	containers = append(containers, instance.Spec.Sidecars...)
@@ -539,7 +568,7 @@ func hasUserEnv(instance *openclawv1alpha1.OpenClawInstance, name string) bool {
 // files into the data volume. Config is always overwritten (operator-managed),
 // while workspace files use seed-once semantics (only copied if not present).
 // Skills are installed via a separate init container using the OpenClaw image.
-func buildInitContainers(instance *openclawv1alpha1.OpenClawInstance, externalWorkspaceFiles map[string]string, additionalExternalFiles map[string]map[string]string, skillPacks *ResolvedSkillPacks) []corev1.Container {
+func buildInitContainers(instance *openclawv1alpha1.OpenClawInstance, externalWorkspaceFiles map[string]string, additionalExternalFiles map[string]map[string]string, skillPacks *ResolvedSkillPacks, o statefulSetOptions) []corev1.Container {
 	var initContainers []corev1.Container
 
 	// Data volume ownership fix. Runs first so every later init container and
@@ -694,7 +723,9 @@ func buildInitContainers(instance *openclawv1alpha1.OpenClawInstance, externalWo
 	// the main containers and stopped only after they have exited, so the
 	// gateway's final metrics flush on shutdown still reaches it instead of
 	// retrying a refused 127.0.0.1:4318 until the shutdown budget runs out.
-	if IsMetricsEnabled(instance) {
+	// Clusters without native sidecar support get a regular container
+	// instead; see buildContainers.
+	if IsMetricsEnabled(instance) && o.nativeSidecars {
 		collector := buildOTelCollectorContainer(instance)
 		collector.RestartPolicy = Ptr(corev1.ContainerRestartPolicyAlways)
 		initContainers = append(initContainers, collector)
